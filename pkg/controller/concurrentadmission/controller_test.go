@@ -55,6 +55,7 @@ var (
 		),
 		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
 		cmpopts.IgnoreFields(kueue.PreemptionGateState{}, "LastTransitionTime"),
+		cmpopts.IgnoreFields(kueue.AdmissionCheckState{}, "LastTransitionTime"),
 		cmpopts.SortSlices(func(a, b kueue.Workload) bool { return a.Name < b.Name }),
 		cmpopts.SortSlices(func(a, b metav1.Condition) bool { return a.Type < b.Type }),
 	}
@@ -990,6 +991,237 @@ func TestReconcile(t *testing.T) {
 					Request(corev1.ResourceCPU, "1").
 					SimpleReserveQuota("cq", "spot", metav1.Now().Time).
 					AdmittedAt(true, metav1.Now().Time).
+					Obj(),
+				*utiltestingapi.MakeWorkload("wl-variant-on-demand", "default").
+					Queue("lq").
+					AllowedFlavors("on-demand").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Obj(),
+			},
+		},
+		"admitted variant syncs admission and admission checks with podSetUpdates to parent": {
+			parentWorkload: utiltestingapi.MakeWorkload("wl-12345", "default").
+				Queue("lq").
+				Label(constants.ConcurrentAdmissionParentLabelKey, "true").
+				Obj(),
+			variantWorkloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("wl-variant-spot", "default").
+					Queue("lq").
+					AllowedFlavors("spot").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Request(corev1.ResourceCPU, "1").
+					SimpleReserveQuota("cq", "spot", metav1.Now().Time).
+					AdmittedAt(true, metav1.Now().Time).
+					AdmissionChecks(kueue.AdmissionCheckState{
+						Name:  "dws-prov-req",
+						State: kueue.CheckStateReady,
+						PodSetUpdates: []kueue.PodSetUpdate{
+							{
+								Name: "main",
+								Annotations: map[string]string{
+									"autoscaling.x-k8s.io/consume-provisioning-request": "sample-req",
+									"autoscaling.x-k8s.io/provisioning-class-name":      "sample-class",
+								},
+							},
+						},
+					}).
+					Obj(),
+				*utiltestingapi.MakeWorkload("wl-variant-on-demand", "default").
+					Queue("lq").
+					AllowedFlavors("on-demand").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Obj(),
+			},
+			wantParentWorkload: utiltestingapi.MakeWorkload("wl-12345", "default").
+				Queue("lq").
+				Label(constants.ConcurrentAdmissionParentLabelKey, "true").
+				Admission(utiltestingapi.MakeAdmission("cq", "main").
+					PodSets(kueue.PodSetAssignment{
+						Name: "main",
+						Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
+							corev1.ResourceCPU: "spot",
+						},
+						Count:         new(int32(1)),
+						ResourceUsage: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					}).Obj()).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadAdmitted,
+					Status:  metav1.ConditionTrue,
+					Reason:  "Admitted",
+					Message: "The variant wl-variant-spot is admitted",
+				}).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionTrue,
+					Reason:  "QuotaReserved",
+					Message: "Quota reserved in ClusterQueue cq",
+				}).
+				AdmissionChecks(kueue.AdmissionCheckState{
+					Name:  "dws-prov-req",
+					State: kueue.CheckStateReady,
+					PodSetUpdates: []kueue.PodSetUpdate{
+						{
+							Name: "main",
+							Annotations: map[string]string{
+								"autoscaling.x-k8s.io/consume-provisioning-request": "sample-req",
+								"autoscaling.x-k8s.io/provisioning-class-name":      "sample-class",
+							},
+						},
+					},
+				}).
+				Obj(),
+			wantVariantWorkloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("wl-variant-spot", "default").
+					Queue("lq").
+					AllowedFlavors("spot").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Request(corev1.ResourceCPU, "1").
+					SimpleReserveQuota("cq", "spot", metav1.Now().Time).
+					AdmittedAt(true, metav1.Now().Time).
+					AdmissionChecks(kueue.AdmissionCheckState{
+						Name:  "dws-prov-req",
+						State: kueue.CheckStateReady,
+						PodSetUpdates: []kueue.PodSetUpdate{
+							{
+								Name: "main",
+								Annotations: map[string]string{
+									"autoscaling.x-k8s.io/consume-provisioning-request": "sample-req",
+									"autoscaling.x-k8s.io/provisioning-class-name":      "sample-class",
+								},
+							},
+						},
+					}).
+					Obj(),
+				*utiltestingapi.MakeWorkload("wl-variant-on-demand", "default").
+					Queue("lq").
+					AllowedFlavors("on-demand").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Obj(),
+			},
+		},
+		"parent already admitted, variant updates admission checks, syncs updated checks to parent": {
+			parentWorkload: utiltestingapi.MakeWorkload("wl-12345", "default").
+				Queue("lq").
+				Label(constants.ConcurrentAdmissionParentLabelKey, "true").
+				Request(corev1.ResourceCPU, "1").
+				Admission(utiltestingapi.MakeAdmission("cq", "main").
+					PodSets(kueue.PodSetAssignment{
+						Name: "main",
+						Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
+							corev1.ResourceCPU: "spot",
+						},
+						Count:         new(int32(1)),
+						ResourceUsage: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					}).Obj()).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadAdmitted,
+					Status:  metav1.ConditionTrue,
+					Reason:  "Admitted",
+					Message: "The variant wl-variant-spot is admitted",
+				}).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionTrue,
+					Reason:  "QuotaReserved",
+					Message: "Quota reserved in ClusterQueue cq",
+				}).
+				Obj(),
+			variantWorkloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("wl-variant-spot", "default").
+					Queue("lq").
+					AllowedFlavors("spot").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Request(corev1.ResourceCPU, "1").
+					SimpleReserveQuota("cq", "spot", metav1.Now().Time).
+					AdmittedAt(true, metav1.Now().Time).
+					AdmissionChecks(kueue.AdmissionCheckState{
+						Name:  "dws-prov-req",
+						State: kueue.CheckStateReady,
+						PodSetUpdates: []kueue.PodSetUpdate{
+							{
+								Name: "main",
+								Annotations: map[string]string{
+									"autoscaling.x-k8s.io/consume-provisioning-request": "sample-req",
+									"autoscaling.x-k8s.io/provisioning-class-name":      "sample-class",
+								},
+							},
+						},
+					}).
+					Obj(),
+				*utiltestingapi.MakeWorkload("wl-variant-on-demand", "default").
+					Queue("lq").
+					AllowedFlavors("on-demand").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Obj(),
+			},
+			wantParentWorkload: utiltestingapi.MakeWorkload("wl-12345", "default").
+				Queue("lq").
+				Label(constants.ConcurrentAdmissionParentLabelKey, "true").
+				Request(corev1.ResourceCPU, "1").
+				Admission(utiltestingapi.MakeAdmission("cq", "main").
+					PodSets(kueue.PodSetAssignment{
+						Name: "main",
+						Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
+							corev1.ResourceCPU: "spot",
+						},
+						Count:         new(int32(1)),
+						ResourceUsage: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					}).Obj()).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadAdmitted,
+					Status:  metav1.ConditionTrue,
+					Reason:  "Admitted",
+					Message: "The variant wl-variant-spot is admitted",
+				}).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionTrue,
+					Reason:  "QuotaReserved",
+					Message: "Quota reserved in ClusterQueue cq",
+				}).
+				AdmissionChecks(kueue.AdmissionCheckState{
+					Name:  "dws-prov-req",
+					State: kueue.CheckStateReady,
+					PodSetUpdates: []kueue.PodSetUpdate{
+						{
+							Name: "main",
+							Annotations: map[string]string{
+								"autoscaling.x-k8s.io/consume-provisioning-request": "sample-req",
+								"autoscaling.x-k8s.io/provisioning-class-name":      "sample-class",
+							},
+						},
+					},
+				}).
+				Obj(),
+			wantVariantWorkloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("wl-variant-spot", "default").
+					Queue("lq").
+					AllowedFlavors("spot").
+					PreemptionGates(caGate()).
+					ControllerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "wl-12345", "").
+					Request(corev1.ResourceCPU, "1").
+					SimpleReserveQuota("cq", "spot", metav1.Now().Time).
+					AdmittedAt(true, metav1.Now().Time).
+					AdmissionChecks(kueue.AdmissionCheckState{
+						Name:  "dws-prov-req",
+						State: kueue.CheckStateReady,
+						PodSetUpdates: []kueue.PodSetUpdate{
+							{
+								Name: "main",
+								Annotations: map[string]string{
+									"autoscaling.x-k8s.io/consume-provisioning-request": "sample-req",
+									"autoscaling.x-k8s.io/provisioning-class-name":      "sample-class",
+								},
+							},
+						},
+					}).
 					Obj(),
 				*utiltestingapi.MakeWorkload("wl-variant-on-demand", "default").
 					Queue("lq").

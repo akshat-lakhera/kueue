@@ -172,6 +172,72 @@ var _ = ginkgo.Describe("Concurrent Admission", func() {
 			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 		})
 
+		ginkgo.It("syncs admission checks and podSetUpdates from admitted variant to parent workload", func() {
+			parentWl := utiltestingapi.MakeWorkload("parent-wl-checks", ns.Name).
+				Request(corev1.ResourceCPU, "1").
+				Queue(kueue.LocalQueueName(lq.Name)).
+				ParentVariant().
+				Obj()
+
+			ginkgo.By("Creating the parent workload", func() {
+				behavioral.MustCreate(ctx, k8sClient, parentWl)
+			})
+
+			var admittedVariant *kueue.Workload
+			ginkgo.By("Finding the admitted variant", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					list := &kueue.WorkloadList{}
+					g.Expect(k8sClient.List(ctx, list, client.InNamespace(ns.Name))).To(gomega.Succeed())
+					for i := range list.Items {
+						if workload.IsAdmitted(&list.Items[i]) && list.Items[i].Name != parentWl.Name {
+							admittedVariant = &list.Items[i]
+							break
+						}
+					}
+					g.Expect(admittedVariant).ToNot(gomega.BeNil())
+				}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Setting admission checks with PodSetUpdates on the admitted variant", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					var current kueue.Workload
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(admittedVariant), &current)).To(gomega.Succeed())
+					current.Status.AdmissionChecks = []kueue.AdmissionCheckState{
+						{
+							Name:  "dws-check",
+							State: kueue.CheckStateReady,
+							PodSetUpdates: []kueue.PodSetUpdate{
+								{
+									Name: "main",
+									Annotations: map[string]string{
+										"autoscaling.x-k8s.io/consume-provisioning-request": "req-1",
+										"autoscaling.x-k8s.io/provisioning-class-name":      "class-1",
+									},
+								},
+							},
+						},
+					}
+					g.Expect(k8sClient.Status().Update(ctx, &current)).To(gomega.Succeed())
+				}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Verifying the parent workload receives the admission checks and PodSetUpdates", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					var currentParent kueue.Workload
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(parentWl), &currentParent)).To(gomega.Succeed())
+					g.Expect(currentParent.Status.AdmissionChecks).To(gomega.HaveLen(1))
+					check := currentParent.Status.AdmissionChecks[0]
+					g.Expect(check.Name).To(gomega.Equal(kueue.AdmissionCheckReference("dws-check")))
+					g.Expect(check.State).To(gomega.Equal(kueue.CheckStateReady))
+					g.Expect(check.PodSetUpdates).To(gomega.HaveLen(1))
+					g.Expect(check.PodSetUpdates[0].Annotations).To(gomega.Equal(map[string]string{
+						"autoscaling.x-k8s.io/consume-provisioning-request": "req-1",
+						"autoscaling.x-k8s.io/provisioning-class-name":      "class-1",
+					}))
+				}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+			})
+		})
+
 		ginkgo.It("Should not count variant workloads in unadmitted workload metrics", func() {
 			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.UnadmittedWorkloadsObservability, true)
 

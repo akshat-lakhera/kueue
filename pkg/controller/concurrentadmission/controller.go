@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -687,6 +688,7 @@ func (r *variantReconciler) syncAdmissionStatus(ctx context.Context, parent *kue
 		if err := workloadpatching.PatchAdmissionStatus(ctx, r.client, parent, r.clock, func(wl *kueue.Workload) (bool, error) {
 			workload.SetQuotaReservation(wl, admittedVariant.Status.Admission, r.clock)
 			workload.SetAdmittedCondition(wl, r.clock.Now(), "Admitted", fmt.Sprintf("The variant %s is admitted", admittedVariant.Name))
+			wl.Status.AdmissionChecks = cloneAdmissionChecks(admittedVariant.Status.AdmissionChecks)
 			log.V(2).Info("Parent is not admitted but a variant is admitted, updating parent to admitted", "parent", klog.KObj(parent), "admittedVariant", klog.KObj(admittedVariant))
 			return true, nil
 		}); err != nil {
@@ -700,11 +702,35 @@ func (r *variantReconciler) syncAdmissionStatus(ctx context.Context, parent *kue
 		}); err != nil {
 			return client.IgnoreNotFound(err)
 		}
+		if !apiequality.Semantic.DeepEqual(parent.Status.Admission, admittedVariant.Status.Admission) ||
+			!apiequality.Semantic.DeepEqual(parent.Status.AdmissionChecks, admittedVariant.Status.AdmissionChecks) {
+			if err := workloadpatching.PatchAdmissionStatus(ctx, r.client, parent, r.clock, func(wl *kueue.Workload) (bool, error) {
+				if !apiequality.Semantic.DeepEqual(wl.Status.Admission, admittedVariant.Status.Admission) {
+					workload.SetQuotaReservation(wl, admittedVariant.Status.Admission, r.clock)
+					workload.SetAdmittedCondition(wl, r.clock.Now(), "Admitted", fmt.Sprintf("The variant %s is admitted", admittedVariant.Name))
+				}
+				wl.Status.AdmissionChecks = cloneAdmissionChecks(admittedVariant.Status.AdmissionChecks)
+				return true, nil
+			}); err != nil {
+				return client.IgnoreNotFound(err)
+			}
+		}
 
 	case admittedVariant == nil && !workload.IsAdmitted(parent):
 		log.V(2).Info("Parent and Variants are both not admitted, no sync needed", "parent", klog.KObj(parent))
 	}
 	return nil
+}
+
+func cloneAdmissionChecks(checks []kueue.AdmissionCheckState) []kueue.AdmissionCheckState {
+	if checks == nil {
+		return nil
+	}
+	out := make([]kueue.AdmissionCheckState, len(checks))
+	for i := range checks {
+		checks[i].DeepCopyInto(&out[i])
+	}
+	return out
 }
 
 func (r *variantReconciler) logger() logr.Logger {
